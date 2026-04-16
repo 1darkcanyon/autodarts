@@ -626,7 +626,7 @@ class DartAccessibilityService : AccessibilityService() {
     }
 
     private fun startThrowing() {
-        val ready = targetConfig.isCalibrated() || (tapAimMode && manualTarget != null)
+        val ready = true
         if (!ready) { tvStatus?.apply { setTextColor(Color.rgb(220, 80, 60)); text = "Calibrate first!" }; return }
         isRunning = true
         btnStart?.apply { text = "STOP"; setBackgroundColor(Color.rgb(140, 25, 20)) }
