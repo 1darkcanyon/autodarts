@@ -87,7 +87,7 @@ class DartAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         stopThrowing()
-        listOf(overlayView, calibOverlay, calibPromptView).forEach {
+        listOf(overlayView, calibCircleView, calibPromptView).forEach {
             it?.let { v -> try { wm.removeView(v) } catch (_: Exception) {} }
         }
     }
@@ -429,12 +429,9 @@ class DartAccessibilityService : AccessibilityService() {
         val stageColor = when (calibStage) { 1 -> Color.rgb(60,200,80); 2 -> Color.rgb(80,160,240); else -> Color.rgb(240,200,60) }
         val stageTitle = when (calibStage) { 0 -> "STEP 1/3  OUTER BOARD"; 1 -> "STEP 2/3  TREBLE RING"; else -> "STEP 3/3  DOUBLE RING" }
         val stageHint  = when (calibStage) {
-            0 -> "Drag ✕ onto BULLSEYE
-Resize ring to OUTER BOARD EDGE"
-            1 -> "Resize GREEN ring to the TREBLE band
-(thin scoring ring ~2/3 out from center)"
-            else -> "Resize BLUE ring to the DOUBLE band
-(thin outer ring near the edge)"
+            0 -> "Drag X onto BULLSEYE | Resize ring to OUTER BOARD EDGE"
+            1 -> "Resize GREEN ring to the TREBLE band (thin ring 2/3 out)"
+            else -> "Resize BLUE ring to the DOUBLE band (outer thin ring)"
         }
 
         val prompt = LinearLayout(this).apply {
@@ -572,7 +569,7 @@ Resize ring to OUTER BOARD EDGE"
 
     private fun closeOverlay() {
         stopThrowing()
-        listOf(overlayView, calibOverlay, calibPromptView).forEach {
+        listOf(overlayView, calibCircleView, calibPromptView).forEach {
             it?.let { v -> try { wm.removeView(v) } catch (_: Exception) {} }
         }
         overlayView = null
