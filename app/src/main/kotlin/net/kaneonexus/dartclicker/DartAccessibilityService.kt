@@ -37,29 +37,15 @@ class DartAccessibilityService : AccessibilityService() {
     private var manualTargetMult = 0
 
     // ── Calibration ───────────────────────────
-    // Sequential tap: user taps each named segment on screen
-    private var calibStep = -1   // -1 = not calibrating, 0..N = current step
-    private var calibOverlay: View? = null
+    // Circle + crosshair overlay the user drags and resizes to fit the board
+    private var calibActive = false
+    private var calibCircleView: View? = null
+    private var calibCircleParams: WindowManager.LayoutParams? = null
     private var calibPromptView: LinearLayout? = null
     private var calibPromptParams: WindowManager.LayoutParams? = null
-
-    // Calibration sequence — segment + multiplier + display name
-    // 1=single, 2=double, 3=treble
-    private val CALIB_SEQUENCE = listOf(
-        Triple(20, 1, "20  (single)"),
-        Triple(20, 3, "TRIPLE 20"),
-        Triple(25, 1, "BULLSEYE"),
-        Triple(3,  1, "3  (single)"),
-        Triple(3,  3, "TRIPLE 3"),
-        Triple(6,  1, "6  (single)"),
-        Triple(6,  3, "TRIPLE 6"),
-        Triple(11, 1, "11  (single)"),
-        Triple(11, 3, "TRIPLE 11"),
-        Triple(20, 2, "DOUBLE 20"),
-        Triple(3,  2, "DOUBLE 3"),
-        Triple(6,  2, "DOUBLE 6"),
-        Triple(11, 2, "DOUBLE 11")
-    )
+    private var calibCx = 0f
+    private var calibCy = 0f
+    private var calibR  = 0f
 
     // ── Overlay ───────────────────────────────
     private var overlayView: View? = null
@@ -197,7 +183,7 @@ class DartAccessibilityService : AccessibilityService() {
 
         // Calibrate button
         expandedContent!!.addView(button("⊙  CALIBRATE BOARD", Color.rgb(30, 30, 80)) {
-            startSegmentCalibration()
+            startCircleCalibration()
         }.also { it.layoutParams = fullWidthLp(topMargin = dp(6)) })
 
         expandedContent!!.addView(divider(dp(5)))
@@ -327,132 +313,199 @@ class DartAccessibilityService : AccessibilityService() {
     }
 
     // ─────────────────────────────────────────
-    //  Segment calibration — tap each named segment
+    //  Circle calibration
+    //  Drag circle to center on bullseye, resize to match board edge
     // ─────────────────────────────────────────
 
-    private fun startSegmentCalibration() {
-        if (calibStep >= 0) return
-        calibStep = 0
-        showCalibStep()
+    private fun startCircleCalibration() {
+        if (calibActive) return
+        calibActive = true
+        val dm = resources.displayMetrics
+        calibCx = dm.widthPixels / 2f
+        calibCy = dm.heightPixels / 2f
+        calibR  = dm.widthPixels * 0.38f   // start at ~38% screen width
+        showCalibCircle()
     }
 
-    private fun showCalibStep() {
-        dismissCalibOverlay()
-        if (calibStep >= CALIB_SEQUENCE.size) {
-            finishCalibration(); return
-        }
-        val (_, _, name) = CALIB_SEQUENCE[calibStep]
-        val remaining = CALIB_SEQUENCE.size - calibStep
+    private fun showCalibCircle() {
+        dismissCalibViews()
+        val dm = resources.displayMetrics
 
-        // Full-screen transparent tap capture
-        calibOverlay = View(this).apply {
-            setBackgroundColor(Color.argb(8, 200, 160, 40))
+        fun activeR() = when (calibStage) { 1 -> calibTrebleR; 2 -> calibDoubleR; else -> calibR }
+        fun setActiveR(r: Float) { when (calibStage) { 1 -> calibTrebleR = r; 2 -> calibDoubleR = r; else -> calibR = r } }
+
+        calibCircleView = object : View(this) {
+            override fun onDraw(canvas: Canvas) {
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val cx = calibCx; val cy = calibCy
+                paint.style = Paint.Style.STROKE
+
+                // Outer board ring
+                paint.strokeWidth = dp(3).toFloat()
+                paint.color = if (calibStage == 0) Color.argb(220, 240, 200, 60) else Color.argb(70, 240, 200, 60)
+                canvas.drawCircle(cx, cy, calibR, paint)
+
+                // Treble ring
+                if (calibTrebleR > 0f) {
+                    paint.strokeWidth = dp(3).toFloat()
+                    paint.color = if (calibStage == 1) Color.argb(220, 60, 200, 80) else Color.argb(70, 60, 200, 80)
+                    canvas.drawCircle(cx, cy, calibTrebleR, paint)
+                }
+
+                // Double ring
+                if (calibDoubleR > 0f) {
+                    paint.strokeWidth = dp(3).toFloat()
+                    paint.color = if (calibStage == 2) Color.argb(220, 80, 160, 240) else Color.argb(70, 80, 160, 240)
+                    canvas.drawCircle(cx, cy, calibDoubleR, paint)
+                }
+
+                // Active ring fill
+                paint.style = Paint.Style.FILL
+                paint.color = when (calibStage) { 1 -> Color.argb(18,60,200,80); 2 -> Color.argb(18,80,160,240); else -> Color.argb(18,240,200,60) }
+                canvas.drawCircle(cx, cy, activeR(), paint)
+
+                // Active crosshair
+                paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2).toFloat()
+                paint.color = when (calibStage) { 1 -> Color.argb(140,60,200,80); 2 -> Color.argb(140,80,160,240); else -> Color.argb(140,240,200,60) }
+                val ar = activeR()
+                canvas.drawLine(cx - ar, cy, cx + ar, cy, paint)
+                canvas.drawLine(cx, cy - ar, cx, cy + ar, paint)
+
+                // Bullseye dot
+                paint.style = Paint.Style.FILL; paint.color = Color.rgb(240, 80, 80)
+                canvas.drawCircle(cx, cy, dp(9).toFloat(), paint)
+                paint.style = Paint.Style.STROKE; paint.color = Color.WHITE; paint.strokeWidth = dp(2).toFloat()
+                canvas.drawCircle(cx, cy, dp(9).toFloat(), paint)
+
+                // Resize handle
+                val hx = cx + activeR(); val hy = cy
+                paint.style = Paint.Style.FILL
+                paint.color = when (calibStage) { 1 -> Color.rgb(60,200,80); 2 -> Color.rgb(80,160,240); else -> Color.rgb(240,200,60) }
+                canvas.drawCircle(hx, hy, dp(16).toFloat(), paint)
+                paint.style = Paint.Style.STROKE; paint.color = Color.WHITE; paint.strokeWidth = dp(2).toFloat()
+                canvas.drawCircle(hx, hy, dp(16).toFloat(), paint)
+                val ha = dp(7).toFloat()
+                canvas.drawLine(hx - ha, hy, hx + ha, hy, paint)
+                canvas.drawLine(hx + ha*0.4f, hy - ha*0.6f, hx + ha, hy, paint)
+                canvas.drawLine(hx + ha*0.4f, hy + ha*0.6f, hx + ha, hy, paint)
+            }
         }
-        val overlayLp = WindowManager.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
+
+        calibCircleParams = WindowManager.LayoutParams(
+            dm.widthPixels, dm.heightPixels,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        )
-        calibOverlay!!.setOnTouchListener { _, ev ->
-            if (ev.action == MotionEvent.ACTION_UP) {
-                recordCalibTap(ev.rawX, ev.rawY)
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = 0; y = 0 }
+
+        var touchMode = 0; var lastX = 0f; var lastY = 0f
+        calibCircleView!!.setOnTouchListener { _, ev ->
+            val tx = ev.rawX; val ty = ev.rawY
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    val hx = calibCx + activeR(); val hy = calibCy
+                    val dh = Math.sqrt(((tx-hx)*(tx-hx)+(ty-hy)*(ty-hy)).toDouble())
+                    touchMode = if (dh < dp(36)) 2 else 1
+                    lastX = tx; lastY = ty
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = tx - lastX; val dy = ty - lastY
+                    if (touchMode == 1 && calibStage == 0) { calibCx += dx; calibCy += dy }
+                    else if (touchMode == 2) {
+                        val nr = Math.sqrt(((tx-calibCx)*(tx-calibCx)+(ty-calibCy)*(ty-calibCy)).toDouble()).toFloat()
+                        setActiveR(nr.coerceAtLeast(dp(30).toFloat()))
+                    }
+                    lastX = tx; lastY = ty
+                    calibCircleView?.invalidate()
+                }
             }
             true
         }
-        wm.addView(calibOverlay, overlayLp)
 
-        // Instruction prompt at bottom of screen
+        wm.addView(calibCircleView, calibCircleParams)
+
+        val stageColor = when (calibStage) { 1 -> Color.rgb(60,200,80); 2 -> Color.rgb(80,160,240); else -> Color.rgb(240,200,60) }
+        val stageTitle = when (calibStage) { 0 -> "STEP 1/3  OUTER BOARD"; 1 -> "STEP 2/3  TREBLE RING"; else -> "STEP 3/3  DOUBLE RING" }
+        val stageHint  = when (calibStage) {
+            0 -> "Drag ✕ onto BULLSEYE
+Resize ring to OUTER BOARD EDGE"
+            1 -> "Resize GREEN ring to the TREBLE band
+(thin scoring ring ~2/3 out from center)"
+            else -> "Resize BLUE ring to the DOUBLE band
+(thin outer ring near the edge)"
+        }
+
         val prompt = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.argb(235, 6, 8, 14))
-            setPadding(dp(20), dp(14), dp(20), dp(14))
+            setPadding(dp(16), dp(12), dp(16), dp(12))
         }
-
         prompt.addView(TextView(this).apply {
-            text = "CALIBRATION  ${calibStep + 1} / ${CALIB_SEQUENCE.size}"
-            setTextColor(Color.rgb(140, 100, 30))
-            textSize = 9f; gravity = Gravity.CENTER
+            text = stageTitle; setTextColor(stageColor)
+            textSize = 11f; gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD
         })
-
         prompt.addView(TextView(this).apply {
-            text = "Tap on:"
-            setTextColor(Color.rgb(160, 160, 160))
-            textSize = 10f; gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, 0)
+            text = stageHint; setTextColor(Color.rgb(160, 160, 160))
+            textSize = 9f; gravity = Gravity.CENTER; setPadding(0, dp(4), 0, dp(8))
         })
-
-        prompt.addView(TextView(this).apply {
-            text = name
-            setTextColor(Color.rgb(240, 200, 60))
-            textSize = 22f; gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(4), 0, dp(8))
-        })
-
-        // Progress bar
-        val progress = View(this).apply {
-            val fraction = (calibStep.toFloat() / CALIB_SEQUENCE.size)
-            setBackgroundColor(Color.rgb(40, 120, 40))
-            layoutParams = LinearLayout.LayoutParams(
-                (dp(260) * fraction).toInt(), dp(4)
-            ).also { it.gravity = Gravity.CENTER_HORIZONTAL }
-        }
-        prompt.addView(progress)
-
         prompt.addView(Button(this).apply {
-            text = "✕  Cancel calibration"
-            setBackgroundColor(Color.rgb(50, 20, 20))
-            setTextColor(Color.rgb(180, 100, 100))
-            textSize = 9f
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).also { it.topMargin = dp(10) }
+            text = if (calibStage < 2) "NEXT  ▶" else "✓  CONFIRM"
+            setBackgroundColor(if (calibStage < 2) Color.rgb(40,80,40) else Color.rgb(25,90,25))
+            setTextColor(Color.WHITE); textSize = 11f
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setOnClickListener { advanceCalibStage() }
+        })
+        prompt.addView(Button(this).apply {
+            text = "✕  Cancel"; setBackgroundColor(Color.rgb(60, 20, 20)); setTextColor(Color.rgb(200, 100, 100)); textSize = 9f
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(4) }
             setOnClickListener { cancelCalibration() }
         })
 
         calibPromptView = prompt
         calibPromptParams = WindowManager.LayoutParams(
-            dp(280), WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(270), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(30) }
         wm.addView(calibPromptView, calibPromptParams)
+        tvStatus?.apply { setTextColor(stageColor); text = stageTitle }
+    }
 
-        tvStatus?.apply {
-            setTextColor(Color.rgb(240, 180, 40))
-            text = "Calib ${calibStep+1}/${CALIB_SEQUENCE.size}: $name"
+    private fun advanceCalibStage() {
+        when (calibStage) {
+            0 -> {
+                targetConfig.setBoardCenter(calibCx, calibCy)
+                calibTrebleR = calibR * 0.62f
+                calibStage = 1; dismissCalibViews(); showCalibCircle()
+            }
+            1 -> {
+                calibDoubleR = calibR * 0.92f
+                calibStage = 2; dismissCalibViews(); showCalibCircle()
+            }
+            2 -> {
+                targetConfig.setBoardCenter(calibCx, calibCy)
+                targetConfig.autoGenerateFromRings(calibR, calibTrebleR, calibDoubleR)
+                targetConfig.setThrowOrigin(calibCx, calibCy + calibR + dp(40))
+                calibActive = false; dismissCalibViews()
+                tvStatus?.apply { setTextColor(Color.rgb(80, 220, 80)); text = "Calibrated — 3 rings!" }
+                updateNextTargetLabel()
+            }
         }
     }
 
-    private fun recordCalibTap(x: Float, y: Float) {
-        if (calibStep < 0 || calibStep >= CALIB_SEQUENCE.size) return
-        val (segment, multiplier, _) = CALIB_SEQUENCE[calibStep]
-        targetConfig.setTarget(segment, multiplier, x, y)
-        calibStep++
-        handler.postDelayed({ showCalibStep() }, 150L)
-    }
-
-    private fun finishCalibration() {
-        calibStep = -1
-        dismissCalibOverlay()
-        tvStatus?.apply { setTextColor(Color.rgb(80, 220, 80)); text = "Calibrated! ${CALIB_SEQUENCE.size} points set." }
-        updateNextTargetLabel()
-    }
-
     private fun cancelCalibration() {
-        calibStep = -1
-        dismissCalibOverlay()
+        calibActive = false; dismissCalibViews()
         tvStatus?.apply { setTextColor(Color.rgb(160, 120, 80)); text = "Calibration cancelled" }
     }
 
-    private fun dismissCalibOverlay() {
-        calibOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }; calibOverlay = null
+    private fun dismissCalibViews() {
+        calibCircleView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; calibCircleView = null
         calibPromptView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; calibPromptView = null
     }
+
 
     // ─────────────────────────────────────────
     //  After-turn target picker

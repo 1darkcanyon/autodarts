@@ -120,6 +120,42 @@ class TargetConfig(context: Context) {
         setTarget(25, 2, center.x, center.y, 12f)
     }
 
+    /**
+     * Generate segment targets using precise ring radii from 3-circle calibration.
+     * @param boardR    outer board radius
+     * @param trebleR   center of treble ring radius
+     * @param doubleR   center of double ring radius
+     */
+    fun autoGenerateFromRings(boardR: Float, trebleR: Float, doubleR: Float) {
+        val center = getBoardCenter() ?: return
+        val segments = listOf(20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5)
+
+        segments.forEachIndexed { i, seg ->
+            val angleDeg = i * 18.0 - 90.0
+            val angleRad = Math.toRadians(angleDeg)
+
+            // Single — midpoint between bull and treble ring
+            val singleR = trebleR * 0.5f
+            setTarget(seg, 1,
+                (center.x + singleR * Math.cos(angleRad)).toFloat(),
+                (center.y + singleR * Math.sin(angleRad)).toFloat(), 18f)
+
+            // Treble — use exact ring radius
+            setTarget(seg, 3,
+                (center.x + trebleR * Math.cos(angleRad)).toFloat(),
+                (center.y + trebleR * Math.sin(angleRad)).toFloat(), 8f)
+
+            // Double — use exact ring radius
+            setTarget(seg, 2,
+                (center.x + doubleR * Math.cos(angleRad)).toFloat(),
+                (center.y + doubleR * Math.sin(angleRad)).toFloat(), 8f)
+        }
+
+        // Bull
+        setTarget(25, 1, center.x, center.y, 22f)
+        setTarget(25, 2, center.x, center.y, 12f)
+    }
+
     fun clear() {
         cache.clear()
         prefs.edit().clear().apply()
