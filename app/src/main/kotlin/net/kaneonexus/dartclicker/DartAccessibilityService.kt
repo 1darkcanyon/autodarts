@@ -39,6 +39,9 @@ class DartAccessibilityService : AccessibilityService() {
     // ── Calibration ───────────────────────────
     // Circle + crosshair overlay the user drags and resizes to fit the board
     private var calibActive = false
+    private var calibStage = 0
+    private var calibTrebleR = 0f
+    private var calibDoubleR = 0f
     private var calibCircleView: View? = null
     private var calibCircleParams: WindowManager.LayoutParams? = null
     private var calibPromptView: LinearLayout? = null
