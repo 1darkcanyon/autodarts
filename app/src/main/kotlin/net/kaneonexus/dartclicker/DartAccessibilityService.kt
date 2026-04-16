@@ -19,52 +19,72 @@ class DartAccessibilityService : AccessibilityService() {
     private var currentMode = GameMode.GAME_501
     private val handler = Handler(Looper.getMainLooper())
 
+    // ── Throw state ───────────────────────────
     private var isRunning = false
-    private var throwDelayMs = 2500L
-    private var accuracyPx = 15f
-    private var flickDp = 120
+    private var throwDelayMs = 2000L
+    private var accuracyPx = 12f
+    private var flickDp = 150      // swipe distance — end point lands dart
 
+    // ── Turn state ────────────────────────────
     private var dartsThisTurn = 0
     private var waitingForNextRound = false
     private var waitForOpponent = false
     private var awaitingOpponent = false
 
-    private var tapAimMode = false
-    private var manualTarget: ScreenTarget? = null
-    private var tapAimOverlay: View? = null
-    private var crosshairView: View? = null
-    private var crosshairParams: WindowManager.LayoutParams? = null
+    // ── Manual target override ─────────────────
+    // Set from the target picker after each round — no tap overlay needed
+    private var manualTargetSeg = 0
+    private var manualTargetMult = 0
 
-    private var calibStep = -1
-    private var calibIndex = 0
-    private val CALIB_SEQUENCE = listOf(Triple(20,1,"20 single"),Triple(20,3,"TRIPLE 20"),Triple(25,1,"BULLSEYE"),Triple(3,1,"3 single"),Triple(3,3,"TRIPLE 3"),Triple(6,1,"6 single"),Triple(6,3,"TRIPLE 6"),Triple(11,1,"11 single"),Triple(11,3,"TRIPLE 11"),Triple(20,2,"DOUBLE 20"),Triple(3,2,"DOUBLE 3"),Triple(6,2,"DOUBLE 6"),Triple(11,2,"DOUBLE 11"))
-    private var calibCrosshair: View? = null
-    private var calibCrosshairParams: WindowManager.LayoutParams? = null
-    private var calibCrosshairX = 0f
-    private var calibCrosshairY = 0f
-    private var calibConfirmBtn: View? = null
+    // ── Calibration ───────────────────────────
+    // Sequential tap: user taps each named segment on screen
+    private var calibStep = -1   // -1 = not calibrating, 0..N = current step
+    private var calibOverlay: View? = null
+    private var calibPromptView: LinearLayout? = null
+    private var calibPromptParams: WindowManager.LayoutParams? = null
 
+    // Calibration sequence — segment + multiplier + display name
+    // 1=single, 2=double, 3=treble
+    private val CALIB_SEQUENCE = listOf(
+        Triple(20, 1, "20  (single)"),
+        Triple(20, 3, "TRIPLE 20"),
+        Triple(25, 1, "BULLSEYE"),
+        Triple(3,  1, "3  (single)"),
+        Triple(3,  3, "TRIPLE 3"),
+        Triple(6,  1, "6  (single)"),
+        Triple(6,  3, "TRIPLE 6"),
+        Triple(11, 1, "11  (single)"),
+        Triple(11, 3, "TRIPLE 11"),
+        Triple(20, 2, "DOUBLE 20"),
+        Triple(3,  2, "DOUBLE 3"),
+        Triple(6,  2, "DOUBLE 6"),
+        Triple(11, 2, "DOUBLE 11")
+    )
+
+    // ── Overlay ───────────────────────────────
     private var overlayView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var expandedContent: LinearLayout? = null
     private var isExpanded = true
     private var turnEndPanel: LinearLayout? = null
 
+    // ── UI refs ───────────────────────────────
     private var tvScore: TextView? = null
     private var tvNextTarget: TextView? = null
     private var tvStatus: TextView? = null
     private var tvTurnCounter: TextView? = null
-    private var tvAimCoords: TextView? = null
     private var btnStart: Button? = null
     private var btnOpponent: Button? = null
     private var btnWaitToggle: Button? = null
-    private var btnTapAim: Button? = null
     private var btnExpandToggle: TextView? = null
 
-    private val BG_ALPHA = 120
+    private val BG_ALPHA = 200
     private val RESIZE_STEPS = intArrayOf(160, 210, 260, 310)
     private var resizeIndex = 1
 
+    // ─────────────────────────────────────────
+    //  Lifecycle
+    // ─────────────────────────────────────────
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -81,10 +101,14 @@ class DartAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         stopThrowing()
-        listOf(overlayView, tapAimOverlay, crosshairView, calibCrosshair, calibConfirmBtn).forEach {
+        listOf(overlayView, calibOverlay, calibPromptView).forEach {
             it?.let { v -> try { wm.removeView(v) } catch (_: Exception) {} }
         }
     }
+
+    // ─────────────────────────────────────────
+    //  Overlay UI
+    // ─────────────────────────────────────────
 
     private fun buildOverlay() {
         val root = LinearLayout(this).apply {
@@ -93,6 +117,7 @@ class DartAccessibilityService : AccessibilityService() {
             setPadding(dp(10), dp(8), dp(10), dp(8))
         }
 
+        // ── Top bar ──
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -127,6 +152,7 @@ class DartAccessibilityService : AccessibilityService() {
         })
         root.addView(topBar)
 
+        // ── THROW row (always visible) ──
         val alwaysRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -146,105 +172,69 @@ class DartAccessibilityService : AccessibilityService() {
         alwaysRow.addView(tvStatus)
         root.addView(alwaysRow)
 
-        turnEndPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-            setBackgroundColor(Color.argb(80, 20, 40, 20))
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).also { it.topMargin = dp(4) }
-        }
-        turnEndPanel!!.addView(label("── 3 DARTS THROWN ──", 8f, Color.rgb(160, 200, 100), center = true))
-        turnEndPanel!!.addView(label("Choose next target:", 8f, Color.rgb(120, 150, 80)))
+        // ── After-3-darts panel (hidden until turn ends) ──
+        buildTurnEndPanel(root)
 
-        val tRow1 = hRow(dp(3))
-        listOf("T20" to Pair(20,3), "T19" to Pair(19,3), "T18" to Pair(18,3), "Bull" to Pair(25,1))
-            .forEach { (lbl, seg) -> tRow1.addView(smallSegBtn(lbl) { setTargetFromPicker(seg.first, seg.second) }) }
-        turnEndPanel!!.addView(tRow1)
-
-        val tRow2 = hRow(dp(2))
-        listOf("D20" to Pair(20,2), "D16" to Pair(16,2), "D10" to Pair(10,2), "D8" to Pair(8,2))
-            .forEach { (lbl, seg) -> tRow2.addView(smallSegBtn(lbl) { setTargetFromPicker(seg.first, seg.second) }) }
-        turnEndPanel!!.addView(tRow2)
-
-        btnWaitToggle = button(waitLabel(), waitColor()) { toggleWaitMode() }.also {
-            it.layoutParams = fullWidthLp(topMargin = dp(4))
-        }
-        turnEndPanel!!.addView(btnWaitToggle)
-
-        btnOpponent = button("▶  YOUR TURN", Color.rgb(15, 50, 100)) { resumeAfterOpponent() }.also {
-            it.setTextColor(Color.rgb(100, 170, 255))
-            it.visibility = View.GONE
-            it.layoutParams = fullWidthLp(topMargin = dp(3))
-        }
-        turnEndPanel!!.addView(btnOpponent)
-
-        turnEndPanel!!.addView(button("▶  THROW NEXT ROUND", Color.rgb(20, 80, 30)) {
-            startNextRound()
-        }.also { it.layoutParams = fullWidthLp(topMargin = dp(4)) })
-
-        root.addView(turnEndPanel)
-
+        // ── Expanded settings ──
         expandedContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.VISIBLE
         }
+
         expandedContent!!.addView(divider(dp(6)))
+
         tvScore = label("Ready", 9f, Color.rgb(200, 170, 80)).also { it.setPadding(0, 0, 0, dp(2)) }
         expandedContent!!.addView(tvScore)
 
-        val targetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        tvNextTarget = label("Next: —", 9f, Color.rgb(80, 160, 80)).also {
-            it.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        targetRow.addView(tvNextTarget)
-        tvAimCoords = label("", 8f, Color.rgb(160, 120, 40))
-        targetRow.addView(tvAimCoords)
-        expandedContent!!.addView(targetRow)
+        tvNextTarget = label("Next: —", 9f, Color.rgb(80, 160, 80))
+        expandedContent!!.addView(tvNextTarget)
 
-        expandedContent!!.addView(divider(dp(6)))
+        expandedContent!!.addView(divider(dp(5)))
+
+        // Mode
         expandedContent!!.addView(label("MODE", 7f, Color.rgb(90, 65, 25)))
         expandedContent!!.addView(buildModeSpinner())
 
-        btnTapAim = button(tapAimLabel(), tapAimColor()) { toggleTapAim() }.also {
-            it.layoutParams = fullWidthLp(topMargin = dp(5))
-        }
-        expandedContent!!.addView(btnTapAim)
-        expandedContent!!.addView(button("⊙  CALIBRATE BOARD", Color.rgb(30, 30, 70)) {
+        // Calibrate button
+        expandedContent!!.addView(button("⊙  CALIBRATE BOARD", Color.rgb(30, 30, 80)) {
             startSegmentCalibration()
-        }.also { it.layoutParams = fullWidthLp(topMargin = dp(4)) })
+        }.also { it.layoutParams = fullWidthLp(topMargin = dp(6)) })
 
-        expandedContent!!.addView(divider(dp(6)))
-        expandedContent!!.addView(label("SPEED  (gap between darts)", 7f, Color.rgb(90, 65, 25)))
+        expandedContent!!.addView(divider(dp(5)))
+
+        // Speed
+        expandedContent!!.addView(label("SPEED  (between darts)", 7f, Color.rgb(90, 65, 25)))
         expandedContent!!.addView(SeekBar(this).apply {
-            max = 18; progress = 3
+            max = 20; progress = 5   // default ~2000ms
             setOnSeekBarChangeListener(seekListener { p ->
-                throwDelayMs = (3000L - p * 150L).coerceAtLeast(300L)
+                throwDelayMs = (3000L - p * 130L).coerceAtLeast(400L)
             })
         })
         expandedContent!!.addView(sliderRow("Fast", "Slow"))
 
+        // Accuracy
         expandedContent!!.addView(label("ACCURACY", 7f, Color.rgb(90, 65, 25)).also { it.setPadding(0, dp(3), 0, 0) })
         expandedContent!!.addView(SeekBar(this).apply {
-            max = 70; progress = 15
-            setOnSeekBarChangeListener(seekListener { p -> accuracyPx = p.toFloat().coerceAtLeast(2f) })
+            max = 60; progress = 12
+            setOnSeekBarChangeListener(seekListener { p -> accuracyPx = (p + 2).toFloat() })
         })
         expandedContent!!.addView(sliderRow("Precise", "Wild"))
 
+        // Flick distance
         expandedContent!!.addView(label("FLICK DISTANCE", 7f, Color.rgb(90, 65, 25)).also { it.setPadding(0, dp(3), 0, 0) })
         expandedContent!!.addView(SeekBar(this).apply {
-            max = 40; progress = 12
-            setOnSeekBarChangeListener(seekListener { p -> flickDp = 60 + p * 5 })
+            max = 40; progress = 15
+            setOnSeekBarChangeListener(seekListener { p -> flickDp = 80 + p * 5 })
         })
         expandedContent!!.addView(sliderRow("Short", "Long"))
 
-        expandedContent!!.addView(hRow(dp(5)).also { row ->
+        // RESET + ONE
+        expandedContent!!.addView(hRow(dp(6)).also { row ->
             row.addView(button("RESET", Color.rgb(50, 30, 10)) { resetGame() }.also {
                 it.layoutParams = splitLp(rightMargin = dp(3))
             })
-            row.addView(button("ONE", Color.rgb(50, 25, 50)) {
-                if (targetConfig.isCalibrated() || manualTarget != null) throwDart()
+            row.addView(button("ONE DART", Color.rgb(50, 25, 50)) {
+                throwOneDart()
             }.also {
                 it.setTextColor(Color.rgb(200, 150, 200))
                 it.layoutParams = splitLp(leftMargin = dp(3))
@@ -262,6 +252,7 @@ class DartAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(6); y = dp(60) }
 
+        // Drag
         var ix = 0; var iy = 0; var itx = 0; var ity = 0
         dragHandle.setOnTouchListener { _, ev ->
             val p = overlayParams!!
@@ -274,7 +265,204 @@ class DartAccessibilityService : AccessibilityService() {
             }
             true
         }
+
         wm.addView(overlayView, overlayParams)
+    }
+
+    private fun buildTurnEndPanel(root: LinearLayout) {
+        turnEndPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setBackgroundColor(Color.argb(100, 10, 30, 10))
+            setPadding(dp(6), dp(8), dp(6), dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(4) }
+        }
+
+        turnEndPanel!!.addView(label("── 3 DARTS THROWN ──", 8f,
+            Color.rgb(140, 200, 100), center = true))
+        turnEndPanel!!.addView(label("Next target:", 7f, Color.rgb(100, 140, 80)).also {
+            it.setPadding(0, dp(4), 0, 0)
+        })
+
+        // Row 1: Trebles
+        val r1 = hRow(dp(3))
+        listOf("T20" to Pair(20,3), "T19" to Pair(19,3), "T18" to Pair(18,3), "T17" to Pair(17,3))
+            .forEach { (l, s) -> r1.addView(segBtn(l, Color.rgb(180, 60, 30)) { pickTarget(s.first, s.second, l) }) }
+        turnEndPanel!!.addView(r1)
+
+        // Row 2: More trebles + bull
+        val r2 = hRow(dp(2))
+        listOf("T16" to Pair(16,3), "T15" to Pair(15,3), "Bull" to Pair(25,1), "D-Bull" to Pair(25,2))
+            .forEach { (l, s) -> r2.addView(segBtn(l, Color.rgb(30, 100, 60)) { pickTarget(s.first, s.second, l) }) }
+        turnEndPanel!!.addView(r2)
+
+        // Row 3: Doubles
+        val r3 = hRow(dp(2))
+        listOf("D20" to Pair(20,2), "D16" to Pair(16,2), "D10" to Pair(10,2), "D8" to Pair(8,2))
+            .forEach { (l, s) -> r3.addView(segBtn(l, Color.rgb(30, 60, 120)) { pickTarget(s.first, s.second, l) }) }
+        turnEndPanel!!.addView(r3)
+
+        // Opponent wait toggle
+        btnWaitToggle = button(waitLabel(), waitColor()) { toggleWaitMode() }.also {
+            it.layoutParams = fullWidthLp(topMargin = dp(5))
+        }
+        turnEndPanel!!.addView(btnWaitToggle)
+
+        // YOUR TURN — only shown in opponent mode
+        btnOpponent = button("▶  YOUR TURN", Color.rgb(15, 50, 100)) { resumeAfterOpponent() }.also {
+            it.setTextColor(Color.rgb(100, 170, 255))
+            it.visibility = View.GONE
+            it.layoutParams = fullWidthLp(topMargin = dp(3))
+        }
+        turnEndPanel!!.addView(btnOpponent)
+
+        // Throw next round
+        turnEndPanel!!.addView(button("▶  THROW NEXT ROUND", Color.rgb(20, 80, 30)) {
+            startNextRound()
+        }.also { it.layoutParams = fullWidthLp(topMargin = dp(5)) })
+
+        root.addView(turnEndPanel)
+    }
+
+    // ─────────────────────────────────────────
+    //  Segment calibration — tap each named segment
+    // ─────────────────────────────────────────
+
+    private fun startSegmentCalibration() {
+        if (calibStep >= 0) return
+        calibStep = 0
+        showCalibStep()
+    }
+
+    private fun showCalibStep() {
+        dismissCalibOverlay()
+        if (calibStep >= CALIB_SEQUENCE.size) {
+            finishCalibration(); return
+        }
+        val (_, _, name) = CALIB_SEQUENCE[calibStep]
+        val remaining = CALIB_SEQUENCE.size - calibStep
+
+        // Full-screen transparent tap capture
+        calibOverlay = View(this).apply {
+            setBackgroundColor(Color.argb(8, 200, 160, 40))
+        }
+        val overlayLp = WindowManager.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        )
+        calibOverlay!!.setOnTouchListener { _, ev ->
+            if (ev.action == MotionEvent.ACTION_UP) {
+                recordCalibTap(ev.rawX, ev.rawY)
+            }
+            true
+        }
+        wm.addView(calibOverlay, overlayLp)
+
+        // Instruction prompt at bottom of screen
+        val prompt = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.argb(235, 6, 8, 14))
+            setPadding(dp(20), dp(14), dp(20), dp(14))
+        }
+
+        prompt.addView(TextView(this).apply {
+            text = "CALIBRATION  ${calibStep + 1} / ${CALIB_SEQUENCE.size}"
+            setTextColor(Color.rgb(140, 100, 30))
+            textSize = 9f; gravity = Gravity.CENTER
+        })
+
+        prompt.addView(TextView(this).apply {
+            text = "Tap on:"
+            setTextColor(Color.rgb(160, 160, 160))
+            textSize = 10f; gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
+        })
+
+        prompt.addView(TextView(this).apply {
+            text = name
+            setTextColor(Color.rgb(240, 200, 60))
+            textSize = 22f; gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(4), 0, dp(8))
+        })
+
+        // Progress bar
+        val progress = View(this).apply {
+            val fraction = (calibStep.toFloat() / CALIB_SEQUENCE.size)
+            setBackgroundColor(Color.rgb(40, 120, 40))
+            layoutParams = LinearLayout.LayoutParams(
+                (dp(260) * fraction).toInt(), dp(4)
+            ).also { it.gravity = Gravity.CENTER_HORIZONTAL }
+        }
+        prompt.addView(progress)
+
+        prompt.addView(Button(this).apply {
+            text = "✕  Cancel calibration"
+            setBackgroundColor(Color.rgb(50, 20, 20))
+            setTextColor(Color.rgb(180, 100, 100))
+            textSize = 9f
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(10) }
+            setOnClickListener { cancelCalibration() }
+        })
+
+        calibPromptView = prompt
+        calibPromptParams = WindowManager.LayoutParams(
+            dp(280), WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(30) }
+        wm.addView(calibPromptView, calibPromptParams)
+
+        tvStatus?.apply {
+            setTextColor(Color.rgb(240, 180, 40))
+            text = "Calib ${calibStep+1}/${CALIB_SEQUENCE.size}: $name"
+        }
+    }
+
+    private fun recordCalibTap(x: Float, y: Float) {
+        if (calibStep < 0 || calibStep >= CALIB_SEQUENCE.size) return
+        val (segment, multiplier, _) = CALIB_SEQUENCE[calibStep]
+        targetConfig.setTarget(segment, multiplier, x, y)
+        calibStep++
+        handler.postDelayed({ showCalibStep() }, 150L)
+    }
+
+    private fun finishCalibration() {
+        calibStep = -1
+        dismissCalibOverlay()
+        tvStatus?.apply { setTextColor(Color.rgb(80, 220, 80)); text = "Calibrated! ${CALIB_SEQUENCE.size} points set." }
+        updateNextTargetLabel()
+    }
+
+    private fun cancelCalibration() {
+        calibStep = -1
+        dismissCalibOverlay()
+        tvStatus?.apply { setTextColor(Color.rgb(160, 120, 80)); text = "Calibration cancelled" }
+    }
+
+    private fun dismissCalibOverlay() {
+        calibOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }; calibOverlay = null
+        calibPromptView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; calibPromptView = null
+    }
+
+    // ─────────────────────────────────────────
+    //  After-turn target picker
+    // ─────────────────────────────────────────
+
+    private fun pickTarget(segment: Int, multiplier: Int, label: String) {
+        manualTargetSeg = segment
+        manualTargetMult = multiplier
+        tvStatus?.apply { setTextColor(Color.rgb(180, 220, 100)); text = "Target: $label" }
+        updateNextTargetLabel()
     }
 
     private fun showTurnEndPanel() {
@@ -289,25 +477,13 @@ class DartAccessibilityService : AccessibilityService() {
         } else {
             btnOpponent?.visibility = View.GONE
             btnWaitToggle?.visibility = View.VISIBLE
-            tvStatus?.apply { setTextColor(Color.rgb(200, 200, 80)); text = "Pick target & throw" }
+            tvStatus?.apply { setTextColor(Color.rgb(200, 200, 80)); text = "Pick target → Throw" }
         }
     }
 
     private fun hideTurnEndPanel() {
         turnEndPanel?.visibility = View.GONE
         btnStart?.isEnabled = true
-    }
-
-    private fun setTargetFromPicker(segment: Int, multiplier: Int) {
-        val screen = targetConfig.getTarget(segment, multiplier) ?: targetConfig.getBoardCenter() ?: return
-        manualTarget = screen
-        tapAimMode = true
-        btnTapAim?.text = tapAimLabel(); btnTapAim?.setBackgroundColor(tapAimColor())
-        moveCrosshair(screen.x, screen.y)
-        updateAimCoordsLabel()
-        val multLabel = when (multiplier) { 3 -> "T"; 2 -> "D"; else -> "" }
-        val segLabel = if (segment == 25) "Bull" else "$segment"
-        tvStatus?.apply { setTextColor(Color.rgb(180, 220, 100)); text = "Aim: $multLabel$segLabel" }
     }
 
     private fun startNextRound() {
@@ -317,13 +493,17 @@ class DartAccessibilityService : AccessibilityService() {
         startThrowing()
     }
 
-    private fun smallSegBtn(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label; setBackgroundColor(Color.rgb(30, 55, 30)); setTextColor(Color.rgb(160, 220, 120))
-        textSize = 8f; setPadding(dp(2), dp(2), dp(2), dp(2))
+    private fun segBtn(label: String, bg: Int, onClick: () -> Unit) = Button(this).apply {
+        text = label; setBackgroundColor(bg); setTextColor(Color.WHITE)
+        textSize = 8f; setPadding(dp(2), dp(3), dp(2), dp(3))
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             .also { it.rightMargin = dp(2) }
         setOnClickListener { onClick() }
     }
+
+    // ─────────────────────────────────────────
+    //  Overlay controls
+    // ─────────────────────────────────────────
 
     private fun toggleExpanded() {
         isExpanded = !isExpanded
@@ -339,7 +519,7 @@ class DartAccessibilityService : AccessibilityService() {
 
     private fun closeOverlay() {
         stopThrowing()
-        listOf(overlayView, tapAimOverlay, crosshairView, calibCrosshair, calibConfirmBtn).forEach {
+        listOf(overlayView, calibOverlay, calibPromptView).forEach {
             it?.let { v -> try { wm.removeView(v) } catch (_: Exception) {} }
         }
         overlayView = null
@@ -362,115 +542,9 @@ class DartAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startSegmentCalibration() {
-        calibCrosshair?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        calibCrosshair = null; calibCrosshairParams = null
-        calibConfirmBtn?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        calibConfirmBtn = null
-    }
-
-    private fun toggleTapAim() {
-        tapAimMode = !tapAimMode
-        btnTapAim?.text = tapAimLabel(); btnTapAim?.setBackgroundColor(tapAimColor())
-        if (tapAimMode) {
-            showTapAimOverlay()
-            tvStatus?.apply { setTextColor(Color.rgb(240, 180, 40)); text = "Tap board to aim" }
-        } else {
-            dismissTapAimOverlay(); dismissCrosshair(); manualTarget = null; updateAimCoordsLabel()
-            tvStatus?.apply { setTextColor(Color.rgb(120, 120, 120)); text = "Auto aim" }
-        }
-    }
-
-    private fun showTapAimOverlay() {
-        if (tapAimOverlay != null) return
-        tapAimOverlay = View(this).apply { setBackgroundColor(Color.argb(10, 200, 160, 40)) }
-        val p = WindowManager.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        )
-        tapAimOverlay!!.setOnTouchListener { _, ev ->
-            if (ev.action == MotionEvent.ACTION_DOWN && tapAimMode) setManualTarget(ev.rawX, ev.rawY)
-            false
-        }
-        wm.addView(tapAimOverlay, p)
-    }
-
-    private fun dismissTapAimOverlay() {
-        tapAimOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }; tapAimOverlay = null
-    }
-
-    private fun setManualTarget(x: Float, y: Float) {
-        manualTarget = ScreenTarget(x, y, accuracyPx); updateAimCoordsLabel(); moveCrosshair(x, y)
-    }
-
-    private fun updateAimCoordsLabel() {
-        val mt = manualTarget
-        tvAimCoords?.apply {
-            text = if (mt != null) "${mt.x.toInt()},${mt.y.toInt()}" else ""
-            setTextColor(Color.rgb(180, 140, 50))
-        }
-        if (tapAimMode && manualTarget != null) {
-            tvNextTarget?.apply { text = "Next: tap aim"; setTextColor(Color.rgb(220, 170, 40)) }
-        } else {
-            tvNextTarget?.setTextColor(Color.rgb(80, 160, 80)); updateNextTargetLabel()
-        }
-    }
-
-    private fun moveCrosshair(x: Float, y: Float) {
-        val size = dp(42)
-        if (crosshairView == null) {
-            crosshairView = object : View(this) {
-                override fun onDraw(canvas: Canvas) {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = Color.rgb(240, 200, 60); strokeWidth = dp(2).toFloat(); style = Paint.Style.STROKE
-                    }
-                    val cx = width / 2f; val cy = height / 2f; val r = width / 2f - dp(3)
-                    canvas.drawCircle(cx, cy, r, paint)
-                    paint.style = Paint.Style.FILL; paint.color = Color.argb(200, 240, 200, 60)
-                    canvas.drawCircle(cx, cy, dp(3).toFloat(), paint)
-                    paint.style = Paint.Style.STROKE; paint.color = Color.rgb(240, 200, 60)
-                    val arm = r + dp(6); val gap = dp(4).toFloat()
-                    canvas.drawLine(cx - arm, cy, cx - gap, cy, paint)
-                    canvas.drawLine(cx + gap, cy, cx + arm, cy, paint)
-                    canvas.drawLine(cx, cy - arm, cx, cy - gap, paint)
-                    canvas.drawLine(cx, cy + gap, cx, cy + arm, paint)
-                }
-            }
-            crosshairParams = WindowManager.LayoutParams(
-                size, size,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.START
-                this.x = (x - size / 2).toInt(); this.y = (y - size / 2).toInt()
-            }
-            wm.addView(crosshairView, crosshairParams)
-        } else {
-            crosshairParams?.apply { this.x = (x - size / 2).toInt(); this.y = (y - size / 2).toInt() }
-            try { wm.updateViewLayout(crosshairView, crosshairParams) } catch (_: Exception) {}
-        }
-    }
-
-    private fun dismissCrosshair() {
-        crosshairView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        crosshairView = null; crosshairParams = null
-    }
-
-    private fun tapAimLabel() = if (tapAimMode) "⊕  Tap Aim: ON" else "⊕  Tap Aim: OFF"
-    private fun tapAimColor() = if (tapAimMode) Color.rgb(70, 50, 10) else Color.rgb(25, 20, 10)
-
-    private fun dartCounterText() = (1..3).joinToString(" ") { i -> if (i <= dartsThisTurn) "◉" else "○" }
-
-    private fun updateTurnCounter() {
-        tvTurnCounter?.apply {
-            text = dartCounterText()
-            setTextColor(when (dartsThisTurn) {
-                0 -> Color.rgb(60, 45, 15); 3 -> Color.rgb(240, 200, 60); else -> Color.rgb(180, 140, 50)
-            })
-        }
-    }
+    // ─────────────────────────────────────────
+    //  Opponent wait
+    // ─────────────────────────────────────────
 
     private fun toggleWaitMode() {
         waitForOpponent = !waitForOpponent
@@ -480,11 +554,15 @@ class DartAccessibilityService : AccessibilityService() {
     private fun resumeAfterOpponent() {
         awaitingOpponent = false; btnOpponent?.visibility = View.GONE
         btnWaitToggle?.visibility = View.VISIBLE
-        tvStatus?.apply { setTextColor(Color.rgb(200, 200, 80)); text = "Pick target & throw" }
+        tvStatus?.apply { setTextColor(Color.rgb(200, 200, 80)); text = "Pick target → Throw" }
     }
 
     private fun waitLabel() = if (waitForOpponent) "⏸  Opponent Wait: ON" else "⏸  Opponent Wait: OFF"
     private fun waitColor() = if (waitForOpponent) Color.rgb(20, 50, 85) else Color.rgb(25, 20, 10)
+
+    // ─────────────────────────────────────────
+    //  Throw scheduling
+    // ─────────────────────────────────────────
 
     private fun toggleRunning() {
         if (waitingForNextRound) return
@@ -492,8 +570,10 @@ class DartAccessibilityService : AccessibilityService() {
     }
 
     private fun startThrowing() {
-        val ready = true
-        if (!ready) { tvStatus?.apply { setTextColor(Color.rgb(220, 80, 60)); text = "Calibrate first!" }; return }
+        if (!targetConfig.isCalibrated()) {
+            tvStatus?.apply { setTextColor(Color.rgb(220, 80, 60)); text = "Calibrate first!" }
+            return
+        }
         isRunning = true
         btnStart?.apply { text = "STOP"; setBackgroundColor(Color.rgb(140, 25, 20)) }
         tvStatus?.apply { setTextColor(Color.rgb(80, 180, 80)); text = "Throwing…" }
@@ -513,43 +593,82 @@ class DartAccessibilityService : AccessibilityService() {
         handler.postDelayed({ if (isRunning) throwDart() }, throwDelayMs)
     }
 
+    private fun throwOneDart() {
+        if (!targetConfig.isCalibrated()) {
+            tvStatus?.apply { setTextColor(Color.rgb(220, 80, 60)); text = "Calibrate first!" }
+            return
+        }
+        throwDart()
+    }
+
+    // ─────────────────────────────────────────
+    //  Core throw — end point of swipe = where dart lands
+    // ─────────────────────────────────────────
+
     private fun throwDart() {
         val engine = gameEngine ?: return
-        val screen: ScreenTarget = when {
-            tapAimMode && manualTarget != null -> manualTarget!!
+
+        // Resolve target screen coordinates
+        val screen: ScreenTarget? = when {
+            // If user picked a target from the panel, use it
+            manualTargetSeg > 0 -> targetConfig.getTarget(manualTargetSeg, manualTargetMult)
+                ?: targetConfig.getBoardCenter()
+            // Otherwise use game engine strategy
             else -> {
                 val t = engine.getNextTarget()
-                val dm = resources.displayMetrics; targetConfig.getTarget(t.segment, t.multiplier) ?: targetConfig.getBoardCenter() ?: ScreenTarget(dm.widthPixels / 2f, dm.heightPixels / 2f, 20f)
+                targetConfig.getTarget(t.segment, t.multiplier)
+                    ?: targetConfig.getBoardCenter()
             }
         }
 
-        val jit = { Random.nextFloat() * 2f - 1f }
-        val endX = screen.x + jit() * accuracyPx
-        val endY = screen.y + jit() * accuracyPx
-        val flickDistance = dp(flickDp).toFloat()
+        if (screen == null) {
+            handler.post { tvStatus?.text = "No target — calibrate!" }
+            return
+        }
+
+        // Add jitter for natural accuracy
+        val jit = { (Random.nextFloat() * 2f - 1f) * accuracyPx }
+        val endX = screen.x + jit()
+        val endY = screen.y + jit()
+
+        // Swipe: start BELOW the board, end AT the target
+        // The END of the gesture registers as the throw landing point
+        val flickPx = dp(flickDp).toFloat()
+        val startX = endX + (Random.nextFloat() * 2f - 1f) * dp(10)
+        val startY = endY + flickPx
 
         val path = Path().apply {
-            moveTo(endX + jit() * dp(8), endY + flickDistance)
+            moveTo(startX, startY)
             lineTo(endX, endY)
         }
 
+        val stroke = GestureDescription.StrokeDescription(
+            path,
+            0L,    // start delay
+            200L   // 200ms swipe duration — feels like a real flick
+        )
+
         dispatchGesture(
-            GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0L, 120L))
-                .build(),
+            GestureDescription.Builder().addStroke(stroke).build(),
             object : GestureResultCallback() {
                 override fun onCompleted(gd: GestureDescription?) {
                     handler.post {
-                        if (!tapAimMode || manualTarget == null) {
+                        // Record hit in game engine
+                        if (manualTargetSeg > 0) {
+                            engine.recordHit(manualTargetSeg, manualTargetMult)
+                        } else {
                             val t = engine.getNextTarget()
                             engine.recordHit(t.segment, t.multiplier)
-                            updateNextTargetLabel()
                         }
+                        updateNextTargetLabel()
                         onDartLanded()
                     }
                 }
                 override fun onCancelled(gd: GestureDescription?) {
-                    handler.post { tvStatus?.text = "Blocked"; onDartLanded() }
+                    handler.post {
+                        tvStatus?.text = "Gesture blocked"
+                        onDartLanded()
+                    }
                 }
             }, null
         )
@@ -558,13 +677,35 @@ class DartAccessibilityService : AccessibilityService() {
     private fun onDartLanded() {
         dartsThisTurn++; updateTurnCounter()
         if (dartsThisTurn >= 3) {
-            isRunning = false; handler.removeCallbacksAndMessages(null)
+            isRunning = false
+            handler.removeCallbacksAndMessages(null)
             btnStart?.apply { text = "THROW"; setBackgroundColor(Color.rgb(25, 100, 50)) }
             showTurnEndPanel()
         } else {
             if (isRunning) scheduleThrow()
         }
     }
+
+    // ─────────────────────────────────────────
+    //  Turn counter
+    // ─────────────────────────────────────────
+
+    private fun dartCounterText() = (1..3).joinToString(" ") { i -> if (i <= dartsThisTurn) "◉" else "○" }
+
+    private fun updateTurnCounter() {
+        tvTurnCounter?.apply {
+            text = dartCounterText()
+            setTextColor(when (dartsThisTurn) {
+                0 -> Color.rgb(60, 45, 15)
+                3 -> Color.rgb(240, 200, 60)
+                else -> Color.rgb(180, 140, 50)
+            })
+        }
+    }
+
+    // ─────────────────────────────────────────
+    //  Game callbacks
+    // ─────────────────────────────────────────
 
     private fun setupGameCallbacks() {
         gameEngine?.onScoreUpdate = { handler.post { tvScore?.text = gameEngine?.getScoreDisplay() } }
@@ -578,7 +719,9 @@ class DartAccessibilityService : AccessibilityService() {
     }
 
     private fun resetGame() {
-        stopThrowing(); dartsThisTurn = 0; waitingForNextRound = false; updateTurnCounter()
+        stopThrowing(); dartsThisTurn = 0; waitingForNextRound = false
+        manualTargetSeg = 0; manualTargetMult = 0
+        updateTurnCounter()
         gameEngine = GameEngine(currentMode); setupGameCallbacks()
         tvScore?.text = "Ready"
         tvStatus?.apply { setTextColor(Color.rgb(100, 100, 100)); text = "${currentMode.label} ready" }
@@ -586,9 +729,19 @@ class DartAccessibilityService : AccessibilityService() {
     }
 
     private fun updateNextTargetLabel() {
-        if (tapAimMode && manualTarget != null) tvNextTarget?.text = "Next: tap"
-        else tvNextTarget?.text = "Next: ${gameEngine?.getNextTargetLabel() ?: "—"}"
+        tvNextTarget?.text = when {
+            manualTargetSeg > 0 -> {
+                val mult = when(manualTargetMult) { 3->"T"; 2->"D"; else->"" }
+                val seg = if (manualTargetSeg == 25) "Bull" else "$manualTargetSeg"
+                "Next: $mult$seg"
+            }
+            else -> "Next: ${gameEngine?.getNextTargetLabel() ?: "—"}"
+        }
     }
+
+    // ─────────────────────────────────────────
+    //  View helpers
+    // ─────────────────────────────────────────
 
     private fun label(text: String, sp: Float, color: Int, bold: Boolean = false, center: Boolean = false) =
         TextView(this).apply {
