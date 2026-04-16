@@ -653,7 +653,7 @@ class DartAccessibilityService : AccessibilityService() {
             tapAimMode && manualTarget != null -> manualTarget!!
             else -> {
                 val t = engine.getNextTarget()
-                targetConfig.getTarget(t.segment, t.multiplier) ?: targetConfig.getBoardCenter() ?: return
+                val dm = resources.displayMetrics; targetConfig.getTarget(t.segment, t.multiplier) ?: targetConfig.getBoardCenter() ?: ScreenTarget(dm.widthPixels / 2f, dm.heightPixels / 2f, 20f)
             }
         }
 
