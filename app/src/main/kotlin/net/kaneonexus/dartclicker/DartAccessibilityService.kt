@@ -35,7 +35,9 @@ class DartAccessibilityService : AccessibilityService() {
     private var crosshairView: View? = null
     private var crosshairParams: WindowManager.LayoutParams? = null
 
-    private var calibStep = CalibStep.IDLE
+    private var calibStep = -1
+    private var calibIndex = 0
+    private val CALIB_SEQUENCE = listOf(Triple(20,1,"20 single"),Triple(20,3,"TRIPLE 20"),Triple(25,1,"BULLSEYE"),Triple(3,1,"3 single"),Triple(3,3,"TRIPLE 3"),Triple(6,1,"6 single"),Triple(6,3,"TRIPLE 6"),Triple(11,1,"11 single"),Triple(11,3,"TRIPLE 11"),Triple(20,2,"DOUBLE 20"),Triple(3,2,"DOUBLE 3"),Triple(6,2,"DOUBLE 6"),Triple(11,2,"DOUBLE 11"))
     private var calibCrosshair: View? = null
     private var calibCrosshairParams: WindowManager.LayoutParams? = null
     private var calibCrosshairX = 0f
@@ -59,11 +61,10 @@ class DartAccessibilityService : AccessibilityService() {
     private var btnTapAim: Button? = null
     private var btnExpandToggle: TextView? = null
 
-    private val BG_ALPHA = 200
+    private val BG_ALPHA = 120
     private val RESIZE_STEPS = intArrayOf(160, 210, 260, 310)
     private var resizeIndex = 1
 
-    enum class CalibStep { IDLE, DRAG_CENTER, DRAG_EDGE }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -211,7 +212,7 @@ class DartAccessibilityService : AccessibilityService() {
         }
         expandedContent!!.addView(btnTapAim)
         expandedContent!!.addView(button("⊙  CALIBRATE BOARD", Color.rgb(30, 30, 70)) {
-            startDragCalibration()
+            startSegmentCalibration()
         }.also { it.layoutParams = fullWidthLp(topMargin = dp(4)) })
 
         expandedContent!!.addView(divider(dp(6)))
@@ -361,142 +362,7 @@ class DartAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startDragCalibration() {
-        if (calibStep != CalibStep.IDLE) return
-        calibStep = CalibStep.DRAG_CENTER
-        val dm = resources.displayMetrics
-        calibCrosshairX = dm.widthPixels / 2f; calibCrosshairY = dm.heightPixels / 2f
-        showCalibCrosshair("STEP 1 of 2\nDrag crosshair to BULLSEYE\nThen tap CONFIRM", Color.rgb(240, 200, 60))
-        tvStatus?.apply { setTextColor(Color.rgb(240, 180, 40)); text = "Drag to bullseye" }
-    }
-
-    private fun showCalibCrosshair(instruction: String, color: Int) {
-        dismissCalibCrosshair()
-        val size = dp(90)
-        calibCrosshair = object : View(this) {
-            override fun onDraw(canvas: Canvas) {
-                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    this.color = color; strokeWidth = dp(3).toFloat(); style = Paint.Style.STROKE
-                }
-                val cx = width / 2f; val cy = height / 2f; val r = width / 2f - dp(5)
-                canvas.drawCircle(cx, cy, r, paint)
-                canvas.drawCircle(cx, cy, r * 0.3f, paint)
-                paint.style = Paint.Style.FILL
-                paint.color = Color.argb(200, (color shr 16) and 0xFF, (color shr 8) and 0xFF, color and 0xFF)
-                canvas.drawCircle(cx, cy, dp(5).toFloat(), paint)
-                paint.style = Paint.Style.STROKE; paint.color = color; paint.strokeWidth = dp(2).toFloat()
-                val arm = r + dp(12); val gap = dp(8).toFloat()
-                canvas.drawLine(cx - arm, cy, cx - gap, cy, paint)
-                canvas.drawLine(cx + gap, cy, cx + arm, cy, paint)
-                canvas.drawLine(cx, cy - arm, cx, cy - gap, paint)
-                canvas.drawLine(cx, cy + gap, cx, cy + arm, paint)
-            }
-        }
-        calibCrosshairParams = WindowManager.LayoutParams(
-            size, size,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = (calibCrosshairX - size / 2).toInt(); y = (calibCrosshairY - size / 2).toInt()
-        }
-        var dx = 0f; var dy = 0f
-        calibCrosshair!!.setOnTouchListener { _, ev ->
-            when (ev.action) {
-                MotionEvent.ACTION_DOWN -> { dx = ev.rawX - calibCrosshairX; dy = ev.rawY - calibCrosshairY }
-                MotionEvent.ACTION_MOVE -> {
-                    calibCrosshairX = ev.rawX - dx; calibCrosshairY = ev.rawY - dy
-                    calibCrosshairParams?.apply {
-                        x = (calibCrosshairX - size / 2).toInt(); y = (calibCrosshairY - size / 2).toInt()
-                    }
-                    try { wm.updateViewLayout(calibCrosshair, calibCrosshairParams) } catch (_: Exception) {}
-                }
-            }
-            true
-        }
-        wm.addView(calibCrosshair, calibCrosshairParams)
-        showCalibConfirmButton(instruction, color)
-    }
-
-    private fun showCalibConfirmButton(instruction: String, color: Int) {
-        calibConfirmBtn?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(230, 6, 8, 12))
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-        }
-        container.addView(TextView(this).apply {
-            text = instruction; setTextColor(color); textSize = 10f; gravity = Gravity.CENTER
-        })
-        container.addView(Button(this).apply {
-            text = "CONFIRM"; setBackgroundColor(Color.rgb(30, 90, 30)); setTextColor(Color.WHITE)
-            textSize = 11f
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).also { it.topMargin = dp(8) }
-            setOnClickListener { handleCalibConfirm() }
-        })
-        container.addView(Button(this).apply {
-            text = "Cancel"; setBackgroundColor(Color.rgb(60, 20, 20)); setTextColor(Color.rgb(200, 100, 100))
-            textSize = 9f
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).also { it.topMargin = dp(4) }
-            setOnClickListener { cancelCalibration() }
-        })
-        calibConfirmBtn = container
-        wm.addView(calibConfirmBtn, WindowManager.LayoutParams(
-            dp(200), WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(50) })
-    }
-
-    private fun handleCalibConfirm() {
-        when (calibStep) {
-            CalibStep.DRAG_CENTER -> {
-                targetConfig.setBoardCenter(calibCrosshairX, calibCrosshairY)
-                calibStep = CalibStep.DRAG_EDGE
-                val dm = resources.displayMetrics
-                calibCrosshairX = minOf(calibCrosshairX + dm.widthPixels * 0.3f, dm.widthPixels - dp(50).toFloat())
-                calibCrosshairY = targetConfig.getBoardCenter()!!.y
-                calibCrosshairParams?.apply {
-                    x = (calibCrosshairX - dp(45)).toInt(); y = (calibCrosshairY - dp(45)).toInt()
-                }
-                try { wm.updateViewLayout(calibCrosshair, calibCrosshairParams) } catch (_: Exception) {}
-                showCalibCrosshair(
-                    "STEP 2 of 2\nDrag crosshair to the\nOUTER EDGE of the board\nThen tap CONFIRM",
-                    Color.rgb(100, 210, 255)
-                )
-                tvStatus?.text = "Drag to board outer edge"
-            }
-            CalibStep.DRAG_EDGE -> {
-                val center = targetConfig.getBoardCenter()!!
-                val dx = (calibCrosshairX - center.x).toDouble()
-                val dy = (calibCrosshairY - center.y).toDouble()
-                val r = Math.sqrt(dx * dx + dy * dy).toFloat()
-                targetConfig.autoGenerateFromCenter(r)
-                targetConfig.setThrowOrigin(center.x, center.y + r + dp(40))
-                finishCalibration()
-            }
-            else -> cancelCalibration()
-        }
-    }
-
-    private fun finishCalibration() {
-        calibStep = CalibStep.IDLE; dismissCalibCrosshair()
-        tvStatus?.apply { setTextColor(Color.rgb(80, 220, 80)); text = "Calibrated! Ready." }
-        updateNextTargetLabel()
-    }
-
-    private fun cancelCalibration() {
-        calibStep = CalibStep.IDLE; dismissCalibCrosshair()
-        tvStatus?.apply { setTextColor(Color.rgb(160, 160, 100)); text = "Calibration cancelled" }
-    }
-
-    private fun dismissCalibCrosshair() {
+    private fun startSegmentCalibration() {
         calibCrosshair?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         calibCrosshair = null; calibCrosshairParams = null
         calibConfirmBtn?.let { try { wm.removeView(it) } catch (_: Exception) {} }
