@@ -1,0 +1,2 @@
+rootProject.name = "AutoDarts"
+include ':app'
